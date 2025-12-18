@@ -10,59 +10,6 @@ import streamlit as st
 
 
 # ==========================
-# 0. Page config & simple CSS
-# ==========================
-
-st.set_page_config(
-    page_title="Basaraya Product Recommender",
-    page_icon="🛒",
-    layout="wide",
-)
-
-# CSS untuk "bubble" produk dan kartu tier
-st.markdown(
-    """
-    <style>
-    .tier-section {
-        padding: 1rem 1.2rem;
-        border-radius: 1rem;
-        margin-bottom: 1rem;
-        background-color: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-    }
-    .tier-title {
-        font-weight: 700;
-        font-size: 1.05rem;
-        margin-bottom: 0.25rem;
-    }
-    .tier-desc {
-        font-size: 0.9rem;
-        margin-bottom: 0.5rem;
-    }
-    .badge-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
-    }
-    .badge {
-        padding: 0.25rem 0.7rem;
-        border-radius: 999px;
-        font-size: 0.85rem;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        backdrop-filter: blur(4px);
-    }
-    .badge.t1 {background-color: rgba(255, 193, 7, 0.25);}
-    .badge.t2 {background-color: rgba(40, 167, 69, 0.25);}
-    .badge.t3 {background-color: rgba(0, 123, 255, 0.25);}
-    .badge.t4 {background-color: rgba(220, 53, 69, 0.25);}
-    .badge.t5 {background-color: rgba(111, 66, 193, 0.25);}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ==========================
 # 1. Parameter dan fungsi Apriori
 # ==========================
 
@@ -82,10 +29,10 @@ def aggregate_transactions(
 ) -> pd.DataFrame:
     """
     Preprocessing utama:
-    - hapus baris dengan No. Faktur / Barang kosong
+    - menghapus baris dengan No. Faktur / Barang kosong
     - normalisasi nama produk (lowercase + strip)
-    - hapus duplikasi item dalam faktur yang sama
-    - agregasi menjadi 1 baris per faktur berisi list item unik
+    - menghapus duplikasi item dalam faktur yang sama
+    - mengagregasi menjadi 1 baris per faktur berisi list item unik
     """
     df = df.dropna(subset=[invoice_col, item_col]).copy()
     df[item_col] = df[item_col].astype(str).str.lower().str.strip()
@@ -218,37 +165,23 @@ def build_tiers(
     rules_main,
     rules_longtail,
     freq_main,
-    freq_lt,
     params: AprioriParams,
 ):
-    """
-    Bangun 5 tier rekomendasi berdasarkan gabungan aturan utama + long tail.
-    - Tier 1: produk terkuat secara global
-    - Tier 2: partner bundling terkuat untuk Tier 1
-    - Tier 3: produk pendukung lain di sekitar Tier 1 & 2
-    - Tier 4: produk long tail berpotensi tinggi
-    - Tier 5: produk pelengkap yang sering muncul sebagai consequent
-    """
-    # Gabungkan frequent itemset untuk support item tunggal
-    freq_combined = {}
-    freq_combined.update(freq_lt)
-    freq_combined.update(freq_main)  # override dengan support yang lebih besar jika ada
-    item_support = compute_item_support(freq_combined)
-
-    # Gabungkan semua aturan
-    rules_all = list(rules_main) + list(rules_longtail)
-
-    # Skor item global
-    item_scores_all = compute_item_scores(rules_all)
-
-    # -------- Tier 1: produk inti (skor tertinggi) --------
-    core_sorted = sorted(item_scores_all.items(), key=lambda x: x[1], reverse=True)
-    tier1_items = [name for name, _ in core_sorted[:3]]
+    """Bangun 5 tier rekomendasi berdasarkan aturan utama + long tail."""
+    # Tier 1: produk inti dengan support terbesar
+    item_support = compute_item_support(freq_main)
+    core_items_sorted = sorted(
+        item_support.items(), key=lambda x: x[1], reverse=True
+    )
+    tier1_items = [name for name, _ in core_items_sorted[:3]]
     tier1_set = set(tier1_items)
 
-    # -------- Tier 2: partner bundling utama untuk Tier 1 --------
+    # Skor item global (semua aturan)
+    item_scores = compute_item_scores(rules_main)
+
+    # Tier 2: produk yang sering berpasangan dengan Tier 1 (partner bundling utama)
     partner_scores = defaultdict(float)
-    for A, B, sup, conf, lift in rules_all:
+    for A, B, sup, conf, lift in rules_main:
         rule_items = set(A) | set(B)
         if tier1_set & rule_items:
             rule_score = sup * conf * lift
@@ -259,37 +192,31 @@ def build_tiers(
         item for item, _ in sorted(partner_scores.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # -------- Tier 3: produk pendukung di sekitar blok utama --------
+    # Tier 3: produk pendukung di sekitar Tier 1 & 2
     exclude_tier12 = tier1_set | set(tier2_items)
     tier3_candidates = {
         item: score
-        for item, score in item_scores_all.items()
+        for item, score in item_scores.items()
         if item not in exclude_tier12
     }
     tier3_items = [
         item for item, _ in sorted(tier3_candidates.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # -------- Tier 4: produk long tail ber-lift tinggi --------
+    # Tier 4: produk long tail ber-lift tinggi (dari aturan long tail)
     lt_scores = compute_item_scores(rules_longtail)
-    exclude_tier123 = exclude_tier12 | set(tier3_items)
-    tier4_candidates = {
-        item: score
-        for item, score in lt_scores.items()
-        if item not in exclude_tier123
-    }
     tier4_items = [
-        item for item, _ in sorted(tier4_candidates.items(), key=lambda x: x[1], reverse=True)[:5]
+        item for item, _ in sorted(lt_scores.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # -------- Tier 5: produk pelengkap (sering jadi consequent) --------
+    # Tier 5: produk pelengkap, sering muncul sebagai consequent
     consequent_scores = defaultdict(float)
-    for A, B, sup, conf, lift in rules_all:
+    for A, B, sup, conf, lift in rules_main:
         rule_score = sup * conf * lift
         for item in B:
             consequent_scores[item] += rule_score
 
-    exclude_prev = exclude_tier123 | set(tier4_items)
+    exclude_prev = tier1_set | set(tier2_items) | set(tier3_items) | set(tier4_items)
     tier5_candidates = {
         item: score
         for item, score in consequent_scores.items()
@@ -344,47 +271,19 @@ def rules_from_freq(freq, abs_counts, params: AprioriParams, longtail: bool = Fa
     return df, filtered
 
 
-def render_tier(name: str, desc: str, items: List[str], tier_class: str):
-    """Render satu blok tier dengan bubble produk."""
-    if items:
-        bubbles = "".join(
-            f'<span class="badge {tier_class}">{p}</span>' for p in items
-        )
-    else:
-        bubbles = '<em>Tidak ada produk teridentifikasi pada tier ini.</em>'
-
-    st.markdown(
-        f"""
-        <div class="tier-section">
-          <div class="tier-title">{name}</div>
-          <div class="tier-desc">{desc}</div>
-          <div class="badge-row">
-            {bubbles}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 # ==========================
 # 3. Streamlit app
 # ==========================
 
 def main():
-    st.header("🛒 Rekomendasi Penataan Produk Basaraya")
-    st.caption(
-        "Analisis market basket otomatis dengan algoritma Advanced Apriori "
-        "untuk membantu penataan rak, bundling, dan promosi produk UMKM."
-    )
+    st.title("Rekomendasi Penataan Produk Berbasis Advanced Apriori")
 
-    with st.expander("Petunjuk singkat", expanded=False):
-        st.markdown(
-            "- Siapkan file transaksi dalam format CSV dengan kolom **`No. Faktur`** dan **`Barang`**.\n"
-            "- `No. Faktur` berisi nomor struk, `Barang` berisi nama produk.\n"
-            "- Upload satu atau beberapa file sekaligus, lalu klik tombol **Proses Analisis**.\n"
-            "- Di bawah akan muncul rekomendasi Tier 1–5 dan contoh aturan asosiasi."
-        )
+    st.write(
+        "Upload satu atau beberapa dataset transaksi (.csv) dengan kolom "
+        "`No. Faktur` dan `Barang`. Aplikasi akan melakukan preprocessing, "
+        "menjalankan algoritma Advanced Apriori, dan menghasilkan rekomendasi "
+        "tier produk untuk penataan rak dan paket bundling."
+    )
 
     uploaded_files = st.file_uploader(
         "Upload file transaksi (boleh lebih dari satu)",
@@ -406,7 +305,7 @@ def main():
             dfs.append(df)
         df_all = pd.concat(dfs, ignore_index=True)
 
-        st.subheader("✨ Ringkasan Data Mentah")
+        st.subheader("Ringkasan Data Mentah")
         st.write(f"Total baris data mentah: **{len(df_all):,}**")
 
         # Preprocessing & agregasi
@@ -428,83 +327,64 @@ def main():
             freq_lt, abs_lt, params, longtail=True
         )
 
-        st.subheader("📊 Ringkasan Aturan Asosiasi")
+        st.subheader("Ringkasan Aturan Asosiasi")
         st.write(
-            f"Aturan utama (support ≥ {params.min_support:.3f}): "
-            f"**{len(rules_main_df):,} aturan**"
+            f"Jumlah aturan utama (support ≥ {params.min_support:.3f}): "
+            f"**{len(rules_main_df):,}**"
         )
         st.write(
-            f"Aturan long tail (support {params.longtail_min_support:.3f}"
-            f"–{params.longtail_max_support:.3f}): "
-            f"**{len(rules_lt_df):,} aturan**"
+            "Jumlah aturan long tail "
+            f"(support {params.longtail_min_support:.3f}–{params.longtail_max_support:.3f}): "
+            f"**{len(rules_lt_df):,}**"
         )
 
-        # Bangun tier rekomendasi dari gabungan aturan
+        # Bangun tier rekomendasi
         tiers = build_tiers(
             rules_main_list,
             rules_lt_list,
             freq_main,
-            freq_lt,
             params,
         )
 
-        st.subheader("🎯 Rekomendasi Tier Penataan Produk")
+        st.subheader("Rekomendasi Tier Penataan Produk")
 
-        render_tier(
-            "Tier 1 – Blok utama rak",
-            (
-                "Produk dengan kekuatan asosiasi dan kontribusi penjualan tertinggi. "
-                "Disarankan ditempatkan di area rak paling strategis dan selalu dijaga stoknya."
-            ),
-            tiers["tier1"],
-            "t1",
+        st.markdown(
+            "**Tier 1 – Blok utama rak**  \n"
+            "Produk dengan penjualan dan keterkaitan paling kuat, sebaiknya ditempatkan di "
+            "area rak yang paling strategis dan selalu dijaga ketersediaan stoknya: "
+            f"**{format_list_id(tiers['tier1'])}**."
         )
 
-        render_tier(
-            "Tier 2 – Paket bundling utama",
-            (
-                "Produk yang paling sering berpasangan dengan Tier 1 dan layak dijadikan "
-                "paket bundling di rak yang sama atau di area display yang berdekatan."
-            ),
-            tiers["tier2"],
-            "t2",
+        st.markdown(
+            "**Tier 2 – Paket bundling utama**  \n"
+            "Produk yang paling sering berpasangan dengan Tier 1 dan layak dijadikan paket bundling "
+            "di rak yang sama atau di area display yang sangat berdekatan: "
+            f"**{format_list_id(tiers['tier2'])}**."
         )
 
-        render_tier(
-            "Tier 3 – Produk pendukung di sekitar blok utama",
-            (
-                "Produk yang sering muncul bersama Tier 1 dan Tier 2 dengan kekuatan asosiasi "
-                "sedikit lebih rendah, cocok ditempatkan di sekitar blok utama untuk "
-                "memperbesar peluang cross-selling."
-            ),
-            tiers["tier3"],
-            "t3",
+        st.markdown(
+            "**Tier 3 – Produk pendukung di sekitar blok utama**  \n"
+            "Produk yang sering muncul bersama Tier 1 dan Tier 2 dengan kekuatan asosiasi sedikit lebih rendah; "
+            "cocok ditempatkan di rak sekitar blok utama untuk memperbesar peluang cross-selling: "
+            f"**{format_list_id(tiers['tier3'])}**."
         )
 
-        render_tier(
-            "Tier 4 – Produk long tail berpotensi tinggi",
-            (
-                "Produk dengan frekuensi penjualan rendah namun memiliki nilai lift tinggi "
-                "pada aturan long tail. Tepat untuk program paket tematik atau promosi "
-                "khusus yang menonjolkan produk UMKM."
-            ),
-            tiers["tier4"],
-            "t4",
+        st.markdown(
+            "**Tier 4 – Produk long tail berpotensi tinggi**  \n"
+            "Produk dengan frekuensi penjualan rendah tetapi memiliki nilai lift tinggi pada aturan long tail; "
+            "relevan untuk program paket tematik atau promosi khusus yang menonjolkan produk UMKM: "
+            f"**{format_list_id(tiers['tier4'])}**."
         )
 
-        render_tier(
-            "Tier 5 – Produk pelengkap dan peluang di dekat kasir",
-            (
-                "Produk yang sering muncul sebagai konsekuen dalam aturan asosiasi dan dapat "
-                "berperan sebagai pelengkap keranjang belanja, cocok ditempatkan dekat kasir "
-                "atau area display tambahan."
-            ),
-            tiers["tier5"],
-            "t5",
+        st.markdown(
+            "**Tier 5 – Produk pelengkap dan peluang di dekat kasir**  \n"
+            "Produk yang sering muncul sebagai konsekuen dalam aturan asosiasi dan dapat berperan sebagai "
+            "pelengkap keranjang belanja, sehingga cocok ditempatkan dekat kasir atau area display tambahan: "
+            f"**{format_list_id(tiers['tier5'])}**."
         )
 
         # Contoh aturan utama
-        st.subheader("🔎 Contoh Aturan Utama (Top 10 berdasarkan lift)")
+        st.subheader("Contoh Aturan Utama (Top 10 berdasarkan lift)")
         if not rules_main_df.empty:
             top_rules_display = rules_main_df.sort_values("lift", ascending=False).head(10).copy()
             top_rules_display["antecedent"] = top_rules_display["antecedent"].apply(
@@ -513,12 +393,12 @@ def main():
             top_rules_display["consequent"] = top_rules_display["consequent"].apply(
                 lambda t: ", ".join(t)
             )
-            st.dataframe(top_rules_display, use_container_width=True)
+            st.dataframe(top_rules_display)
         else:
             st.write("Aturan utama belum terbentuk pada parameter yang digunakan.")
 
-        # Contoh aturan long tail
-        st.subheader("🌱 Contoh Aturan Long Tail (diurutkan berdasarkan lift)")
+        # Contoh aturan long tail (semua, diurutkan berdasarkan lift)
+        st.subheader("Contoh Aturan Long Tail (diurutkan berdasarkan lift)")
         if not rules_lt_df.empty:
             top_lt_display = rules_lt_df.sort_values("lift", ascending=False).copy()
             top_lt_display["antecedent"] = top_lt_display["antecedent"].apply(
@@ -527,7 +407,7 @@ def main():
             top_lt_display["consequent"] = top_lt_display["consequent"].apply(
                 lambda t: ", ".join(t)
             )
-            st.dataframe(top_lt_display, use_container_width=True)
+            st.dataframe(top_lt_display)
         else:
             st.write("Aturan long tail belum terbentuk pada parameter yang digunakan.")
 
