@@ -503,23 +503,6 @@ def main():
             "t5",
         )
 
-        # ========= Penjelasan istilah pada tabel =========
-        with st.expander("Penjelasan istilah pada tabel", expanded=False):
-            st.markdown(
-                """
-                - **Antecedent**: produk yang terlebih dahulu ada di keranjang belanja  
-                  (kondisi “jika pelanggan membeli ...”).
-                - **Consequent**: produk lain yang cenderung ikut terbeli setelah antecedent muncul  
-                  (bagian “maka juga membeli ...”).
-                - **Support**: proporsi transaksi yang berisi kombinasi antecedent dan consequent.  
-                  Makin besar support, makin sering pasangan produk itu muncul di data.
-                - **Confidence**: peluang pelanggan membeli consequent **ketika** sudah membeli antecedent.  
-                  Nilai tinggi berarti aturan tersebut cukup dapat dipercaya untuk rekomendasi.
-                - **Lift**: seberapa kuat hubungan dua produk dibandingkan jika dibeli secara acak.  
-                  Nilai lift di atas 1 menunjukkan kedua produk saling menguatkan satu sama lain.
-                """
-            )
-
         # Aturan utama
         st.subheader("🔎 Pasangan Produk / Aturan Utama")
         if not rules_main_df.empty:
