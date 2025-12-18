@@ -172,7 +172,7 @@ def generate_rules(
                 if sup_x == 0 or sup_y == 0:
                     continue
                 conf = sup_xy / sup_x
-                lift = sup_xy / (sup_x * sup_y)  # sama dengan conf/sup_y
+                lift = conf / sup_y
                 if conf >= min_conf and lift >= min_lift:
                     rules.append((tuple(sorted(A)), tuple(sorted(B)), sup_xy, conf, lift))
     return rules
@@ -216,27 +216,27 @@ def format_list_id(items, max_items=5):
 
 def build_tiers(
     rules_main,
-    rules_potential,
+    rules_longtail,
     freq_main,
-    freq_potential,
+    freq_lt,
     params: AprioriParams,
 ):
     """
-    Bangun 5 tier rekomendasi berdasarkan gabungan aturan utama + aturan produk potensial.
+    Bangun 5 tier rekomendasi berdasarkan gabungan aturan utama + long tail.
     - Tier 1: produk terkuat secara global
     - Tier 2: partner bundling terkuat untuk Tier 1
     - Tier 3: produk pendukung lain di sekitar Tier 1 & 2
-    - Tier 4: produk potensial (support relatif rendah, lift tinggi)
+    - Tier 4: produk long tail berpotensi tinggi
     - Tier 5: produk pelengkap yang sering muncul sebagai consequent
     """
     # Gabungkan frequent itemset untuk support item tunggal
     freq_combined = {}
-    freq_combined.update(freq_potential)
-    freq_combined.update(freq_main)
+    freq_combined.update(freq_lt)
+    freq_combined.update(freq_main)  # override dengan support yang lebih besar jika ada
     item_support = compute_item_support(freq_combined)
 
     # Gabungkan semua aturan
-    rules_all = list(rules_main) + list(rules_potential)
+    rules_all = list(rules_main) + list(rules_longtail)
 
     # Skor item global
     item_scores_all = compute_item_scores(rules_all)
@@ -270,12 +270,12 @@ def build_tiers(
         item for item, _ in sorted(tier3_candidates.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # -------- Tier 4: produk potensial (support rendah, lift tinggi) --------
-    pot_scores = compute_item_scores(rules_potential)
+    # -------- Tier 4: produk long tail ber-lift tinggi --------
+    lt_scores = compute_item_scores(rules_longtail)
     exclude_tier123 = exclude_tier12 | set(tier3_items)
     tier4_candidates = {
         item: score
-        for item, score in pot_scores.items()
+        for item, score in lt_scores.items()
         if item not in exclude_tier123
     }
     tier4_items = [
@@ -309,16 +309,16 @@ def build_tiers(
     return tiers
 
 
-def rules_from_freq(freq, abs_counts, params: AprioriParams, potential: bool = False):
+def rules_from_freq(freq, abs_counts, params: AprioriParams, longtail: bool = False):
     """
     Helper untuk membentuk DataFrame aturan:
     - main rules: hanya 2-itemset (filter_exact_2_only=True)
-    - produk potensial: boleh 2+ item (filter_exact_2_only=False) dengan support di rentang rendah
+    - long tail: boleh 2+ item (filter_exact_2_only=False) dengan support di rentang long tail
     """
-    if potential:
+    if longtail:
         min_sup = params.longtail_min_support
         max_sup = params.longtail_max_support
-        filter_2 = False      # produk potensial boleh lebih dari 2 item
+        filter_2 = False      # long tail boleh lebih dari 2 item
     else:
         min_sup = params.min_support
         max_sup = 1.0
@@ -375,7 +375,7 @@ def main():
     st.header("🛒 Rekomendasi Penataan Produk")
     st.caption(
         "Analisis market basket otomatis dengan algoritma Advanced Apriori "
-        "untuk membantu penataan rak, bundling, dan promosi produk UMKM."
+        "untuk membantu penataan rak, bundling, dan promosi produk."
     )
 
     with st.expander("Petunjuk singkat", expanded=False):
@@ -419,13 +419,13 @@ def main():
         # Apriori utama (support 1%)
         freq_main, abs_main = apriori(transactions, params.min_support)
         rules_main_df, rules_main_list = rules_from_freq(
-            freq_main, abs_main, params, potential=False
+            freq_main, abs_main, params, longtail=False
         )
 
-        # Apriori produk potensial (support 0.2%–1%)
-        freq_pot, abs_pot = apriori(transactions, params.longtail_min_support)
-        rules_pot_df, rules_pot_list = rules_from_freq(
-            freq_pot, abs_pot, params, potential=True
+        # Apriori long tail (support 0.2%–1%)
+        freq_lt, abs_lt = apriori(transactions, params.longtail_min_support)
+        rules_lt_df, rules_lt_list = rules_from_freq(
+            freq_lt, abs_lt, params, longtail=True
         )
 
         st.subheader("📊 Ringkasan Aturan Asosiasi")
@@ -434,17 +434,17 @@ def main():
             f"**{len(rules_main_df):,} aturan**"
         )
         st.write(
-            f"Aturan produk potensial (support {params.longtail_min_support:.3f}"
+            f"Aturan long tail (support {params.longtail_min_support:.3f}"
             f"–{params.longtail_max_support:.3f}): "
-            f"**{len(rules_pot_df):,} aturan**"
+            f"**{len(rules_lt_df):,} aturan**"
         )
 
         # Bangun tier rekomendasi dari gabungan aturan
         tiers = build_tiers(
             rules_main_list,
-            rules_pot_list,
+            rules_lt_list,
             freq_main,
-            freq_pot,
+            freq_lt,
             params,
         )
 
@@ -482,11 +482,11 @@ def main():
         )
 
         render_tier(
-            "Tier 4 – Produk potensial untuk promosi",
+            "Tier 4 – Produk long tail berpotensi tinggi",
             (
-                "Produk dengan frekuensi penjualan relatif rendah namun memiliki nilai asosiasi "
-                "kuat dalam keranjang tertentu. Cocok untuk program paket tematik atau "
-                "promosi khusus yang menonjolkan produk UMKM."
+                "Produk dengan frekuensi penjualan rendah namun memiliki nilai lift tinggi "
+                "pada aturan long tail. Tepat untuk program paket tematik atau promosi "
+                "khusus yang menonjolkan produk UMKM."
             ),
             tiers["tier4"],
             "t4",
@@ -517,19 +517,19 @@ def main():
         else:
             st.write("Aturan utama belum terbentuk pada parameter yang digunakan.")
 
-        # Contoh aturan produk potensial
-        st.subheader("🌱 Contoh Aturan Produk Potensial (diurutkan berdasarkan lift)")
-        if not rules_pot_df.empty:
-            top_pot_display = rules_pot_df.sort_values("lift", ascending=False).copy()
-            top_pot_display["antecedent"] = top_pot_display["antecedent"].apply(
+        # Contoh aturan long tail
+        st.subheader("🌱 Contoh Aturan Long Tail (diurutkan berdasarkan lift)")
+        if not rules_lt_df.empty:
+            top_lt_display = rules_lt_df.sort_values("lift", ascending=False).copy()
+            top_lt_display["antecedent"] = top_lt_display["antecedent"].apply(
                 lambda t: ", ".join(t)
             )
-            top_pot_display["consequent"] = top_pot_display["consequent"].apply(
+            top_lt_display["consequent"] = top_lt_display["consequent"].apply(
                 lambda t: ", ".join(t)
             )
-            st.dataframe(top_pot_display, use_container_width=True)
+            st.dataframe(top_lt_display, use_container_width=True)
         else:
-            st.write("Aturan produk potensial belum terbentuk pada parameter yang digunakan.")
+            st.write("Aturan long tail belum terbentuk pada parameter yang digunakan.")
 
 
 if __name__ == "__main__":
