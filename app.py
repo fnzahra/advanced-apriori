@@ -535,7 +535,7 @@ def main():
             st.write("Aturan utama belum terbentuk pada parameter yang digunakan.")
 
         # Aturan produk potensial
-        st.subheader("🌱 Pasangan Produk / Aturan Produk Potensial")
+        st.subheader("🌱 Pasangan Produk / Aturan Potensial")
         if not rules_pot_df.empty:
             top_pot_display = rules_pot_df.sort_values("lift", ascending=False).copy()
             top_pot_display["antecedent"] = top_pot_display["antecedent"].apply(
