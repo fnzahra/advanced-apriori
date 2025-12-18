@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Set, Tuple
+from typing import List, Set
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +27,13 @@ def aggregate_transactions(
     invoice_col: str = "No. Faktur",
     item_col: str = "Barang",
 ) -> pd.DataFrame:
-    """Preprocessing utama: dropna, normalisasi nama produk, hapus duplikat, agregasi per faktur."""
+    """
+    Preprocessing utama:
+    - menghapus baris dengan No. Faktur / Barang kosong
+    - normalisasi nama produk (lowercase + strip)
+    - menghapus duplikasi item dalam faktur yang sama
+    - mengagregasi menjadi 1 baris per faktur berisi list item unik
+    """
     df = df.dropna(subset=[invoice_col, item_col]).copy()
     df[item_col] = df[item_col].astype(str).str.lower().str.strip()
     df = df.drop_duplicates(subset=[invoice_col, item_col])
@@ -41,6 +47,7 @@ def aggregate_transactions(
 
 
 def apriori(transactions: List[Set[str]], min_support: float):
+    """Algoritma Apriori sederhana untuk frequent itemset."""
     n = len(transactions)
     min_count = max(1, int(min_support * n))
     item_counts = defaultdict(int)
@@ -55,7 +62,7 @@ def apriori(transactions: List[Set[str]], min_support: float):
     L = abs_counts.copy()
     k = 2
 
-    # k-itemset
+    # k-itemset (k ≥ 2)
     while L:
         candidates = {
             i1 | i2
@@ -85,12 +92,22 @@ def apriori(transactions: List[Set[str]], min_support: float):
     return freq, abs_counts
 
 
-def generate_rules(freq, abs_counts, min_conf, min_lift, only_2_items: bool = True):
+def generate_rules(
+    freq,
+    abs_counts,
+    min_conf: float,
+    min_lift: float,
+    filter_exact_2_only: bool = False,
+):
+    """
+    Membentuk aturan asosiasi dari frequent itemset.
+    Jika filter_exact_2_only=True maka hanya aturan dengan 2 item (A -> B) yang diambil.
+    """
     rules = []
     for itemset, sup_xy in freq.items():
         if len(itemset) < 2:
             continue
-        if only_2_items and len(itemset) != 2:
+        if filter_exact_2_only and len(itemset) != 2:
             continue
 
         for r in range(1, len(itemset)):
@@ -113,7 +130,7 @@ def generate_rules(freq, abs_counts, min_conf, min_lift, only_2_items: bool = Tr
 # ==========================
 
 def compute_item_support(freq):
-    """Ambil support untuk item tunggal."""
+    """Ambil support untuk item tunggal dari frequent itemset."""
     support_1 = {}
     for itemset, sup in freq.items():
         if len(itemset) == 1:
@@ -123,7 +140,7 @@ def compute_item_support(freq):
 
 
 def compute_item_scores(rules):
-    """Skor pentingnya item berdasarkan semua aturan yang melibatkannya."""
+    """Skor pentingnya item berdasarkan kontribusinya di semua aturan."""
     scores = defaultdict(float)
     for A, B, sup, conf, lift in rules:
         rule_score = sup * conf * lift
@@ -133,6 +150,7 @@ def compute_item_scores(rules):
 
 
 def format_list_id(items, max_items=5):
+    """Format list nama produk jadi kalimat pendek."""
     items = list(items)[:max_items]
     if not items:
         return "-"
@@ -149,22 +167,20 @@ def build_tiers(
     freq_main,
     params: AprioriParams,
 ):
-    # Item support dari frequent itemset utama
+    """Bangun 5 tier rekomendasi berdasarkan aturan utama + long tail."""
+    # Tier 1: produk inti dengan support terbesar
     item_support = compute_item_support(freq_main)
-
-    # Tier 1: produk inti (support terbesar)
     core_items_sorted = sorted(
         item_support.items(), key=lambda x: x[1], reverse=True
     )
     tier1_items = [name for name, _ in core_items_sorted[:3]]
+    tier1_set = set(tier1_items)
 
-    # Hitung skor item dari aturan utama
+    # Skor item global (semua aturan)
     item_scores = compute_item_scores(rules_main)
 
-    # Tier 2: produk yang paling sering berpasangan dengan Tier 1
-    tier1_set = set(tier1_items)
+    # Tier 2: produk yang sering berpasangan dengan Tier 1 (partner bundling utama)
     partner_scores = defaultdict(float)
-
     for A, B, sup, conf, lift in rules_main:
         rule_items = set(A) | set(B)
         if tier1_set & rule_items:
@@ -187,13 +203,13 @@ def build_tiers(
         item for item, _ in sorted(tier3_candidates.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # Tier 4: produk long tail ber-lift tinggi
+    # Tier 4: produk long tail ber-lift tinggi (dari aturan long tail)
     lt_scores = compute_item_scores(rules_longtail)
     tier4_items = [
         item for item, _ in sorted(lt_scores.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
 
-    # Tier 5: produk pelengkap dekat kasir (sering jadi consequent)
+    # Tier 5: produk pelengkap, sering muncul sebagai consequent
     consequent_scores = defaultdict(float)
     for A, B, sup, conf, lift in rules_main:
         rule_score = sup * conf * lift
@@ -221,20 +237,26 @@ def build_tiers(
 
 
 def rules_from_freq(freq, abs_counts, params: AprioriParams, longtail: bool = False):
-    """Helper supaya outputnya df rules untuk main dan long tail."""
+    """
+    Helper untuk membentuk DataFrame aturan:
+    - main rules: hanya 2-itemset (filter_exact_2_only=True)
+    - long tail: boleh 2+ item (filter_exact_2_only=False) dengan support di rentang long tail
+    """
     if longtail:
         min_sup = params.longtail_min_support
         max_sup = params.longtail_max_support
+        filter_2 = False      # long tail boleh lebih dari 2 item
     else:
         min_sup = params.min_support
         max_sup = 1.0
+        filter_2 = True       # aturan utama fokus 2-item
 
     rules = generate_rules(
         freq,
         abs_counts,
         min_conf=params.min_confidence,
         min_lift=params.min_lift,
-        only_2_items=True,  # fokus aturan 2-item
+        filter_exact_2_only=filter_2,
     )
 
     filtered = [
@@ -276,7 +298,7 @@ def main():
         return
 
     if st.button("Proses Analisis"):
-        # Gabung semua file
+        # Gabung semua file yang di-upload
         dfs = []
         for f in uploaded_files:
             df = pd.read_csv(f)
@@ -293,16 +315,23 @@ def main():
         # Konversi ke list of set
         transactions = [set(items) for items in baskets["Barang"]]
 
-        # Apriori utama
+        # Apriori utama (support 1%)
         freq_main, abs_main = apriori(transactions, params.min_support)
-        rules_main_df, rules_main_list = rules_from_freq(freq_main, abs_main, params, longtail=False)
+        rules_main_df, rules_main_list = rules_from_freq(
+            freq_main, abs_main, params, longtail=False
+        )
 
-        # Apriori long tail
+        # Apriori long tail (support 0.2%–1%)
         freq_lt, abs_lt = apriori(transactions, params.longtail_min_support)
-        rules_lt_df, rules_lt_list = rules_from_freq(freq_lt, abs_lt, params, longtail=True)
+        rules_lt_df, rules_lt_list = rules_from_freq(
+            freq_lt, abs_lt, params, longtail=True
+        )
 
         st.subheader("Ringkasan Aturan Asosiasi")
-        st.write(f"Jumlah aturan utama (support ≥ {params.min_support:.3f}): **{len(rules_main_df):,}**")
+        st.write(
+            f"Jumlah aturan utama (support ≥ {params.min_support:.3f}): "
+            f"**{len(rules_main_df):,}**"
+        )
         st.write(
             "Jumlah aturan long tail "
             f"(support {params.longtail_min_support:.3f}–{params.longtail_max_support:.3f}): "
@@ -322,35 +351,35 @@ def main():
         st.markdown(
             "**Tier 1 – Blok utama rak**  \n"
             "Produk dengan penjualan dan keterkaitan paling kuat, sebaiknya ditempatkan di "
-            "area rak paling strategis dan selalu dijaga stoknya: "
+            "area rak yang paling strategis dan selalu dijaga ketersediaan stoknya: "
             f"**{format_list_id(tiers['tier1'])}**."
         )
 
         st.markdown(
             "**Tier 2 – Paket bundling utama**  \n"
             "Produk yang paling sering berpasangan dengan Tier 1 dan layak dijadikan paket bundling "
-            "di rak yang sama atau sangat berdekatan: "
+            "di rak yang sama atau di area display yang sangat berdekatan: "
             f"**{format_list_id(tiers['tier2'])}**."
         )
 
         st.markdown(
             "**Tier 3 – Produk pendukung di sekitar blok utama**  \n"
-            "Produk yang sering muncul bersama Tier 1 dan Tier 2 dengan dukungan sedikit lebih rendah; "
-            "cocok ditempatkan di rak sekitar blok utama untuk memperkuat peluang cross-selling: "
+            "Produk yang sering muncul bersama Tier 1 dan Tier 2 dengan kekuatan asosiasi sedikit lebih rendah; "
+            "cocok ditempatkan di rak sekitar blok utama untuk memperbesar peluang cross-selling: "
             f"**{format_list_id(tiers['tier3'])}**."
         )
 
         st.markdown(
             "**Tier 4 – Produk long tail berpotensi tinggi**  \n"
-            "Produk dengan frekuensi penjualan rendah tetapi nilai lift tinggi pada aturan long tail; "
-            "relevan untuk program paket tematik atau promosi khusus: "
+            "Produk dengan frekuensi penjualan rendah tetapi memiliki nilai lift tinggi pada aturan long tail; "
+            "relevan untuk program paket tematik atau promosi khusus yang menonjolkan produk UMKM: "
             f"**{format_list_id(tiers['tier4'])}**."
         )
 
         st.markdown(
             "**Tier 5 – Produk pelengkap dan peluang di dekat kasir**  \n"
             "Produk yang sering muncul sebagai konsekuen dalam aturan asosiasi dan dapat berperan sebagai "
-            "pelengkap keranjang belanja, cocok ditempatkan dekat kasir atau area display tambahan: "
+            "pelengkap keranjang belanja, sehingga cocok ditempatkan dekat kasir atau area display tambahan: "
             f"**{format_list_id(tiers['tier5'])}**."
         )
 
@@ -368,10 +397,10 @@ def main():
         else:
             st.write("Aturan utama belum terbentuk pada parameter yang digunakan.")
 
-        # Contoh aturan long tail
-        st.subheader("Contoh Aturan Long Tail (Top 10 berdasarkan lift)")
+        # Contoh aturan long tail (semua, diurutkan berdasarkan lift)
+        st.subheader("Contoh Aturan Long Tail (diurutkan berdasarkan lift)")
         if not rules_lt_df.empty:
-            top_lt_display = rules_lt_df.sort_values("lift", ascending=False).head(10).copy()
+            top_lt_display = rules_lt_df.sort_values("lift", ascending=False).copy()
             top_lt_display["antecedent"] = top_lt_display["antecedent"].apply(
                 lambda t: ", ".join(t)
             )
